@@ -4,13 +4,17 @@ import gzip
 import pandas as pd
 import sqlite3
 from collections import namedtuple
+import numpy as np
 
 AlleleFreq = namedtuple(
     'AlleleFreq', ['generation', 'position', 'origin', 'dac',
-                   'fixation', 'neutral', 'label'])
+                   'fixation', 'neutral', 'label', 's', 'w'])
 
+PopFitness = namedtuple(
+    'PopFitness', ['generation', 'mean', 'variance'])
 
 def count_frequencies(pop, num_neutral):
+    N = pop.N
     fixations = []
     for i, j in zip(pop.fixation_times, pop.fixations):
         if i >= 10*pop.N and j.g <= 10*pop.N + 200:
@@ -30,15 +34,32 @@ def count_frequencies(pop, num_neutral):
                     fixations.append((g, pop.mutations[i].pos))
 
     data = []
+    pop_data = []
     # Iterate over all samaple nodes.
     # False means to exclude the "alive" individuals
     # at time pop.generation
-    for t, n, m in pop.sample_timepoints(False):
+    for t, n, metadata in pop.sample_timepoints(False):
+        if t%N == 0:
+            print(t)
         tables, idmap = fwdpy11.simplify_tables(pop.tables, n)
         muts_visited = 0
+        
+        # we remap the input/output nodes to get the leaves at a given timepoint that carries a mutation
+        # below in ws_samples
+        remap_nodes = []
+        for i in range(len(metadata)):
+            remap_nodes.append(idmap[metadata[i]['nodes']])
+        
+        remap_nodes = np.ravel(remap_nodes)
+        
+        # Get the distribution of diploid fitnesses for this generation
+        ws = metadata['w']
+        pop_data.append(PopFitness(t, ws.mean(), ws.var()))
+        
         # NOTE: do not update samples lists below nodes.
-        for tree in fwdpy11.TreeIterator(tables, idmap[n]):
+        for tree in fwdpy11.TreeIterator(tables, idmap[n], update_samples=True):
             for m in tree.mutations():
+                assert m.key < len(pop.mutations)
                 muts_visited += 1
                 mut_node = m.node
                 # NOTE: infinite sites means
@@ -49,7 +70,13 @@ def count_frequencies(pop, num_neutral):
                 assert pos >= tree.left and pos < tree.right
                 origin = pop.mutations[m.key].g
                 fixed = int((origin, pos) in fixations)
-
+                
+                # Get the ws for the samples carrying the mutation
+                m_samples = tree.samples_below(m.node)
+                # There are two nodes per individual, hence the //2
+                ws_samples = [metadata[np.where(remap_nodes == samp)[0][0]//2]['w'] for samp in m_samples]
+                w_m = np.mean(ws_samples)
+                
                 # Edge case: we skip mutations that fixed prior
                 # to any of these time points
                 fixed_before = False
@@ -58,16 +85,18 @@ def count_frequencies(pop, num_neutral):
                 if not fixed_before:
                     data.append(AlleleFreq(t, pos, origin,
                                            dac, fixed, int(m.neutral),
-                                           pop.mutations[m.key].label))
+                                           pop.mutations[m.key].label,
+                                           pop.mutations[m.key].s, w_m))
         assert muts_visited == len(tables.mutations)
-    return data
+    return data, pop_data
 
 
 if __name__ == "__main__":
     infile = sys.argv[1]
     outfile = sys.argv[2]
-    neutral_mu = float(sys.argv[3])
-    seed = int(sys.argv[4])
+    outfile_pop = sys.argv[3]
+    neutral_mu = float(sys.argv[4])
+    seed = int(sys.argv[5])
 
     pop = fwdpy11.DiploidPopulation.load_from_file(infile)
 
@@ -78,8 +107,13 @@ if __name__ == "__main__":
     n = fwdpy11.infinite_sites(rng, pop, neutral_mu)
     print(len(pop.mcounts))
     print(f"{n} neutral variants added")
-
-    freqs = count_frequencies(pop, n)
+    
+    #freqs = count_frequencies(pop, n)
+    freqs, pop_data = count_frequencies(pop, n)
     df = pd.DataFrame(freqs, columns=AlleleFreq._fields)
+    df_pop = pd.DataFrame(pop_data, columns=PopFitness._fields)
     with sqlite3.connect(outfile) as conn:
         df.to_sql('data', conn, if_exists='replace')
+    with sqlite3.connect(outfile_pop) as conn:
+        df_pop.to_sql('data', conn, if_exists='replace')
+    
