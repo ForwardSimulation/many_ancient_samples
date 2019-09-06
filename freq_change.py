@@ -43,6 +43,10 @@ def count_frequencies(pop, num_neutral):
             print(t)
         tables, idmap = fwdpy11.simplify_tables(pop.tables, n)
         muts_visited = 0
+
+        # Convert input (pre-simplification) node labels
+        # to output (post-simplification) node labels
+        output_nodes = idmap[n]
         
         # we remap the input/output nodes to get the leaves at a given timepoint that carries a mutation
         # below in ws_samples
@@ -73,6 +77,8 @@ def count_frequencies(pop, num_neutral):
                 
                 # Get the ws for the samples carrying the mutation
                 m_samples = tree.samples_below(m.node)
+                for mi in m_samples:
+                    assert mi in output_nodes, f"{mi} not an output node"
                 # There are two nodes per individual, hence the //2
                 ws_samples = [metadata[np.where(remap_nodes == samp)[0][0]//2]['w'] for samp in m_samples]
                 w_m = np.mean(ws_samples)
